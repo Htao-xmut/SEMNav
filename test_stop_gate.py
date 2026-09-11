@@ -11,6 +11,7 @@ import numpy as np
 logging.basicConfig(level=logging.WARNING)
 
 from avdb_env import AVDBEnv
+from avdb_sim_wrapper import PolarAction
 
 PASS, FAIL = [], []
 
@@ -134,6 +135,50 @@ def test_reject_and_approach():
           and abs(env2._approach_bearing - expect) < 0.01
           and env2._approach_miss == 0,
           f'bearing={env2._approach_bearing} expect={expect}')
+
+
+# ---------- bm17 绕门修复: _proximity_rejected_stop_guard ----------
+def test_proximity_guard():
+    # ① 连票被拦转接近锁 (bm17 Step12 复刻: 小框 4.95m 远距误判 close)
+    env = make_env()
+    env._last_obs = {'yolo_detection': det([0.48, 0.48, 0.52, 0.52]),
+                     'depth_sensor': depth_frame(4.95)}
+    m = {'done': True, 'finish_status': 'fp', 'goal_reached': False}
+    env._proximity_rejected_stop_guard(PolarAction.stop, m, 4.95)
+    check('守卫①: 连票 stop 被拦 → done 翻回 False 继续走',
+          m['done'] is False and m['finish_status'] == 'running')
+    check('守卫①: 清连票 + 建接近锁 (走过去不停)',
+          env.agent.stop_history[-1] is False
+          and env._approach_bearing is not None
+          and env._arbitration_close is False,
+          f'h={env.agent.stop_history} bearing={env._approach_bearing}')
+
+    # ② 连票过门 (米制 CLOSE → 尊重停止, 交给 fp-救援)
+    env2 = make_env()
+    env2._last_obs = {'yolo_detection': det([0.40, 0.40, 0.60, 0.60]),   # 4% ≥ 2%
+                      'depth_sensor': depth_frame(4.95)}
+    m2 = {'done': True, 'finish_status': 'fp', 'goal_reached': False}
+    env2._proximity_rejected_stop_guard(PolarAction.stop, m2, 3.00)
+    check('守卫②: 米制 CLOSE → 尊重停止 (done 不翻, 连票不清)',
+          m2['done'] is True and env2._arbitration_close is True
+          and env2.agent.stop_history[-1] is True)
+
+    # ③ 无框连票清零 (无米制证据 → far, 不建锁)
+    env3 = make_env()
+    env3._last_obs = {'yolo_detection': {}}
+    m3 = {'done': True, 'finish_status': 'fp'}
+    env3._proximity_rejected_stop_guard(PolarAction.stop, m3, 4.95)
+    check('守卫③: 无框 → 拒停 + 清票 + 不建锁',
+          m3['done'] is False and env3.agent.stop_history[-1] is False
+          and env3._approach_bearing is None)
+
+    # ④ 投票级: 被拒的票就地清零 (动作不是 stop → metrics 不动)
+    env4 = make_env()
+    m4 = {'done': False, 'finish_status': 'running'}
+    env4._proximity_rejected_stop_guard(None, m4, 5.16)
+    check('守卫④: 投票级拒绝 → 只清票不动 metrics',
+          m4 == {'done': False, 'finish_status': 'running'}
+          and env4.agent.stop_history == [False, True, True, False, False])
 
 
 # ---------- ③ _crop_confirm ----------
@@ -310,6 +355,7 @@ def test_coverage_exhausted():
 if __name__ == '__main__':
     test_stop_evidence()
     test_reject_and_approach()
+    test_proximity_guard()
     test_crop_confirm()
     test_arrival_confirm()
     test_arrival_arm()

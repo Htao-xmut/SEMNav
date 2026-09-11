@@ -802,6 +802,37 @@ class AVDBEnv(ObjectNavEnv):
                 logging.info(f'[STOP-EVIDENCE] approach lock re-aimed '
                              f'rel={rel:+.0f}deg → next step AUTO-STEER')
 
+    def _proximity_rejected_stop_guard(self, agent_action, metrics, distance):
+        """bm17 绕门修复: PROXIMITY 判 close 被评估侧拒后的两级守卫
+
+        (动作级) 连票已确立的真 stop 必须过米制停票门 _stop_evidence —
+        此前该路径的 stop 不进下方仲裁块 (not _force_stop 互斥), 拒绝又
+        不翻 done, 连票 stop 直接以 fp 终结回合。现在: CLOSE → 尊重停止
+        (交给 fp-救援); FAR/无框 → 翻回 done + 清连票 + 接近锁 (规则 2)。
+        (投票级) 被拒的票就地清零, 防止跨拒绝累积成未来的连票。
+        """
+        if agent_action is PolarAction.stop:
+            ev = self._stop_evidence(getattr(self, '_last_obs', None))
+            if ev is not None and ev[0] == 'close':
+                self._arbitration_close = True
+                logging.info(f'[STOP-EVIDENCE] CLOSE (proximity path) → honor '
+                             f'consecutive-stop at {distance:.2f}m '
+                             f'(bbox depth backed)')
+            else:
+                self._reject_stop_and_approach(
+                    f'[STOP-EVIDENCE] FAR (proximity path) → veto '
+                    f'consecutive-stop at {distance:.2f}m, walk to it instead '
+                    f'(bm17 gate bypass fixed)',
+                    yolo_info=(ev[1] if ev is not None else None))
+                metrics['done'] = False
+                metrics['finish_status'] = 'running'
+                self._arbitration_close = False
+        else:
+            # 投票级: 这一步投的票已被拒 → 清票, 别让幽灵票攒成连票
+            self._reject_stop_and_approach(
+                '[PROXIMITY] vote rejected → reset consecutive votes '
+                '(fp semantics preserved)')
+
     def _coverage_exhausted(self):
         """④ 覆盖完成判据: 地图无前沿灰格 (无可走未到访) 且已有足够覆盖
 
@@ -2132,6 +2163,11 @@ class AVDBEnv(ObjectNavEnv):
                 logging.info(f"[PROXIMITY] VLM judged close, but eval distance "
                              f"{distance:.2f}m >= {self.VISUAL_SUCCESS_THRESHOLD}m "
                              f"→ keep searching (fp semantics preserved)")
+                # bm17 绕门修复: 本路径的 stop 此前被下方仲裁块的
+                # `not _force_stop` 互斥条件排除在停票门外, 拒绝又只设标志
+                # 不翻 done → 连票 stop 带着 done=True 直接终结回合
+                # (bm17 Step12 于 4.95m fp, 全程零 [STOP-EVIDENCE])
+                self._proximity_rejected_stop_guard(agent_action, metrics, distance)
 
         # === 停止仲裁 (替代旧 STOP-BLOCK 一刀切拦截): VLM 要停 + 有新鲜
         #     目击时, 用 VLM 视觉判断"该不该停"。
