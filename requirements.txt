@@ -1,0 +1,14 @@
+# VLMnav 依赖清单（Python 3.9 / conda env "vlm_nav" 实测版本锁定）
+# 注意: habitat-sim 0.3.1 建议用 conda 安装 headless 版:
+#   conda install habitat-sim==0.3.1 headless -c conda-forge -c aihabitat
+# 其余用 pip 安装即可。
+
+dashscope==1.25.21
+habitat_sim==0.3.1
+numpy==1.23.5
+numpy-quaternion==2023.0.4
+omegaconf==2.3.0
+opencv-python==4.8.1.78
+pandas==2.2.3
+python-dotenv==1.2.1
+ultralytics==8.4.72

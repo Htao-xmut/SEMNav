@@ -1,0 +1,55 @@
+task: GOAT
+agent_cls: GOATAgent
+env_cls: GOATEnv
+
+agent_cfg:
+  navigability_mode: 'depth_sensor' # one of ['none', 'depth_estimate', 'segmentation', 'depth_sensor']
+  project: true
+  pivot: false
+  context_history: 0 
+  explore_bias: 4 
+  max_action_dist: 1.7
+  min_action_dist: 0.5
+  clip_frac: 0.66
+  stopping_action_dist: 1.5
+  default_action: 0.2
+  spacing_ratio: 360
+  num_theta: 60
+  image_edge_threshold: 0.04
+  turn_around_cooldown: 3
+  navigability_height_threshold: 0.2
+  map_scale: 100
+  vlm_cfg:
+    # Use Ollama with LLaVA model (LOCAL DEPLOYMENT)
+    model_cls: OllamaVLM
+    model_kwargs:
+      model: ${OLLAMA_MODEL:-llava:7b}
+      max_image_res: 512  # LLaVA works better with lower resolution
+      system_instruction: null  # LLaVA doesn't support system instructions well
+    # Alternative: Use Gemini (ORIGINAL)
+    # model_cls: GeminiVLM
+    # model_kwargs:
+    #   model: gemini-1.5-flash-001
+
+sim_cfg:
+  agent_height: 1.5
+  agent_radius: 0.17
+  allow_slide: true
+  use_goal_image_agent: false
+  sensor_cfg:
+    height: 1.5
+    pitch: -0.45
+    res_factor: 1
+    fov: 131
+
+env_cfg:
+  num_episodes: 1
+  max_steps_per_subgoal: 10
+  log_freq: 1
+  split: val
+  success_threshold: 0.3 
+  instances: 1
+  instance: 0
+  parallel: false
+  name: default
+  port: 5000

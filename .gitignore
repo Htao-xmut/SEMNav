@@ -1,0 +1,54 @@
+# ===== 密钥与环境（绝不入库）=====
+.env
+*.pem
+
+# ===== 数据 / 模型权重 / 场景（体积大或有许可限制）=====
+data/
+datasets/
+cache/
+*.pt
+*.pth
+*.pkl
+*.glb
+
+# ===== 日志 =====
+logs/
+nohup.out
+*.log
+
+# ===== 内部文档与笔记（仓库只保留 README）=====
+/*.md
+!README.md
+任务/
+imgs/
+backup/
+乱七八糟的总结报告/
+
+# ===== Python 产物 =====
+__pycache__/
+*.pyc
+*.egg-info/
+
+# ===== 编辑器 / 杂项 =====
+.idea/
+.vscode/
+wandb/
+/-p/
+/c:
+*.bak
+*.bak_*
+
+# 内部工作产物与材料（不入库）
+/scene_visualization/
+/panorama_visualization/
+/old_fold/
+/ppt_work/
+*.tar
+/source2.pdf
+/pdf_text2.txt
+/vlmnav_paper_content.txt
+/复现指南_ubuntu.txt
+/复现指南_ubuntu_backup.txt
+/创新工作室组织架构图.html
+# habitat-sim 源码副本（外部依赖, 不入库）
+/habitat-sim

@@ -1,0 +1,76 @@
+# 快速测试配置 - 使用预定义的简单场景
+task: QuickTest
+dataset:
+  name: QuickTest
+  type: habitat_internal
+  
+env_cls: QuickTestEnv
+
+agent_cls: ObjectNavAgent
+
+sim_cfg:
+  agent_height: 1.5
+  agent_radius: 0.17
+  allow_slide: true
+  use_goal_image_agent: false
+  sensor_cfg:
+    height: 480
+    width: 640
+    pitch: -0.45
+    res_factor: 1
+    fov: 131
+
+agent_cfg:
+  navigability_mode: 'depth_sensor'
+  project: true
+  pivot: false
+  context_history: 0
+  max_steps: 50
+  map_scale: 100
+  default_action: 0.2
+  explore_bias: 4
+  max_action_dist: 1.7
+  min_action_dist: 0.5
+  clip_frac: 0.66
+  stopping_action_dist: 1.5
+  spacing_ratio: 360
+  num_theta: 60
+  image_edge_threshold: 0.04
+  turn_around_cooldown: 3
+  navigability_height_threshold: 0.2
+  sensor_cfg:
+    depth: true
+    rgb: true
+    semantic: false
+    height: 480
+    width: 640
+    hfov: 131
+    pitch: -25
+    fov: 131
+    res_factor: 1
+  vlm_cfg:
+    model_cls: OllamaVLM
+    model_kwargs:
+      model: llava:7b
+      max_image_res: 512  # LLaVA works better with lower resolution
+      system_instruction: null  # LLaVA doesn't support system instructions well
+
+camera:
+  hfov: 131
+  pitch: -25
+  height: 1.25
+
+robot:
+  radius: 0.17
+  allow_slide: true
+
+env_cfg:
+  num_episodes: 1
+  success_distance: 0.5
+  max_steps: 20
+  split: val
+  name: quick_test_001
+  log_freq: 1
+  instances: 1
+  instance: 0
+  parallel: False
