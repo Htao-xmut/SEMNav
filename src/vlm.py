@@ -18,6 +18,30 @@ class VLM:
     This class should be extended to implement specific VLMs.
     """
 
+    def __init_subclass__(cls, **kwargs):
+        """p26 修复① (专家评审方案): import 时机签名契约强制。
+
+        #26c 事故: plain_text 加到了 OllamaVLM (line 370), 实弹用的
+        QwenVLClient (line 709) 没有 → 三局 18 次关键 VLM 分析全崩,
+        单测假绿 (静态断言只 grep 'plain_text' 字符串)。@abstractmethod
+        只查"方法被覆写", 不查签名兼容 (Python 无此机制) — 本钩子用
+        inspect 逐参比对, 子类缺基类参数时 **类定义即抛 TypeError**,
+        烧 API 之前就炸。宁可报错, 不可静默适配 (不用 **kwargs 糊)。
+        """
+        super().__init_subclass__(**kwargs)
+        if 'call_chat' in cls.__dict__:
+            import inspect as _inspect
+            base_params = set(_inspect.signature(
+                VLM.call_chat).parameters) - {'self'}
+            sub_params = set(_inspect.signature(
+                cls.__dict__['call_chat']).parameters) - {'self'}
+            missing = base_params - sub_params
+            if missing:
+                raise TypeError(
+                    f"{cls.__name__}.call_chat 契约违约: 缺基类参数 "
+                    f"{sorted(missing)} (基类签名参数: {sorted(base_params)}) "
+                    f"— 修子类签名, 不要加 **kwargs 掩盖")
+
     def __init__(self, **kwargs):
         """
         Initializes the VLM agent with optional parameters.
@@ -37,7 +61,8 @@ class VLM:
         """
         raise NotImplementedError
 
-    def call_chat(self, history: int, images: list[np.array], text_prompt: str):
+    def call_chat(self, history: int, images: list[np.array], text_prompt: str,
+                  plain_text: bool = False):
         """
         Perform context-aware inference with the VLM, incorporating past context.
 
@@ -49,6 +74,10 @@ class VLM:
             A list of RGB image arrays.
         text_prompt : str
             The text prompt to be processed by the agent.
+        plain_text : bool
+            True = 本次调用要自由文本 + 规定行 (FIRST_DIRECTION: /
+            SCAN_SUSPICIOUS: 等六图扫描协议) → 子类不得注入 JSON-only
+            系统指令 (#26c 根因)。
         """
         raise NotImplementedError
 
@@ -110,7 +139,8 @@ class GeminiVLM(VLM):
         )
         self.session = self.model.start_chat(history=[])
 
-    def call_chat(self, history: int, images: list[np.array], text_prompt: str):
+    def call_chat(self, history: int, images: list[np.array], text_prompt: str,
+                  plain_text: bool = False):
         """
         Perform context-aware inference with the Gemini model.
 
@@ -211,7 +241,8 @@ class OpenAIVLM(VLM):
         self.max_image_res = max_image_res
 
 
-    def call_chat(self, history: int, images: list[np.array], text_prompt: str):
+    def call_chat(self, history: int, images: list[np.array], text_prompt: str,
+                  plain_text: bool = False):
         """
         Perform context-aware inference with the OpenAI model.
 
@@ -367,7 +398,8 @@ class OllamaVLM(VLM):
         encoded = base64.b64encode(buffered.getvalue()).decode('utf-8')
         return encoded
 
-    def call_chat(self, history: int, images: list[np.array], text_prompt: str):
+    def call_chat(self, history: int, images: list[np.array], text_prompt: str,
+                  plain_text: bool = False):
         """
         Perform context-aware inference with the Ollama model.
         Uses /api/chat endpoint for better multi-turn conversation support.
@@ -380,15 +412,20 @@ class OllamaVLM(VLM):
             A list of RGB image arrays.
         text_prompt : str
             The text prompt to process.
+        plain_text : bool
+            True = 本次调用要自由文本 + 规定行 (FIRST_DIRECTION: /
+            SCAN_SUSPICIOUS: 等六图扫描协议) → 不注入 JSON-only 系统
+            指令。p16 三局实弹: SCAN_ 行零解析的根因即此压制 (所有
+            调用默认带 "Respond ONLY with JSON")。
         """
         # Build messages for chat API
         messages = []
-        
+
         # Check if this is a LLaVA model (special handling required)
         is_llava = 'llava' in self.model.lower()
-        
+
         # Add system instruction if provided (SKIP for LLaVA - it doesn't support system prompts well)
-        if self.system_instruction and not is_llava:
+        if self.system_instruction and not is_llava and not plain_text:
             messages.append({
                 "role": "system",
                 "content": self.system_instruction
@@ -685,7 +722,8 @@ class QwenVLClient(VLM):
         self.model = model
         self.max_image_res = max_image_res
         self.system_instruction = system_instruction
-        
+        self.call_count = 0      # batch runner 计量: 成功调用次数 (episode 差分)
+
         # Set API key
         if api_key:
             dashscope.api_key = api_key
@@ -699,10 +737,11 @@ class QwenVLClient(VLM):
         self.client = MultiModalConversation()
         logging.info(f"Initialized QwenVLClient with model: {model}")
 
-    def call_chat(self, history: int, images: list, text_prompt: str) -> str:
+    def call_chat(self, history: int, images: list, text_prompt: str,
+                  plain_text: bool = False) -> str:
         """
         Call Qwen-VL chat API with images and text prompt.
-        
+
         Parameters
         ----------
         history : int
@@ -711,7 +750,12 @@ class QwenVLClient(VLM):
             List of RGB image arrays
         text_prompt : str
             Text prompt
-            
+        plain_text : bool
+            True = 本次调用要自由文本 + 规定行 (FIRST_DIRECTION: /
+            SCAN_SUSPICIOUS: 等六图扫描协议) → 不注入 JSON-only 系统指令。
+            #26c 修复: 该参数此前只加在 OllamaVLM 上, 实弹用的是本类 →
+            p26 三局 18 次关键分析全崩 (TypeError: unexpected keyword)。
+
         Returns
         -------
         str
@@ -733,7 +777,10 @@ class QwenVLClient(VLM):
             messages = []
             
             # Add system message if provided
-            if self.system_instruction:
+            # plain_text=True (#26c): 六图扫描协议要 FIRST_DIRECTION:/
+            # SCAN_SUSPICIOUS: 规定行, JSON-only 系统指令会压制其输出
+            # (p16 实弹三局 SCAN_ 行零解析的根因) — 跳过注入
+            if self.system_instruction and not plain_text:
                 messages.append({
                     "role": "system",
                     "content": [{"text": self.system_instruction}]
@@ -764,12 +811,17 @@ class QwenVLClient(VLM):
             # Extract response text
             output_text = response.output.choices[0].message.content[0]['text']
             logging.info(f"Qwen response received (length: {len(output_text)})")
-            
+            self.call_count += 1     # batch runner 计量
+
             return output_text
             
         except Exception as e:
             logging.error(f"Error calling Qwen-VL API: {e}", exc_info=True)
             return ""
+
+    def get_spend(self):
+        """成功调用次数 (batch runner 效率计量, 表 VIII)"""
+        return self.call_count
 
     def _encode_image_to_base64(self, image: np.array) -> str:
         """

@@ -4,7 +4,47 @@ from PIL import Image, ImageDraw
 from agent import ObjectNavAgent, PolarAction
 
 
+def bridge_hint(fresh):
+    """B1 目击→停票桥 (P0 断层修复): 新鲜目击 → 停票 prompt 重查提示
+
+    actionVLM 在 reasoning 里看见目标 (YOLO/VLM 目击登记) 此到不了停票
+    通道 — stoppingVLM 同帧独立三步链保守投 0, stop_requests=0, 9/9
+    失败全超时。桥只提示"重查当前帧", 停不停仍由 stopping 自己判,
+    不绕任何米制门。
+    """
+    return (f"[BRIDGE] {fresh['steps_ago']} step(s) ago the navigation module "
+            f"sighted the target here ({fresh['desc']}). If the target is "
+            f"visible in the CURRENT frame, answer done=1.")
+
+
 class AVDBAgent(ObjectNavAgent):
+
+    def _parse_vlm_rotate_steps(self, opt, reasoning):
+        """#52a (d01r step43-46 实弹): reasoning 角度折算 — 默认停用
+
+        旧代码裸抓 reasoning 第一个角度数字折算 rotate_steps: d01r
+        step43 VLM 选 [2] turn RIGHT 30° 微调, reasoning 提目击方位
+        "+177°" → 抓到 177 → rotate_steps=6 → wrapper 用它覆盖
+        chain_count=1 → 30° 微调物理转成 180°, 与 APPROACH 锁覆盖
+        (aligned 22°, 本意选 [1] 30° 微调)互甩 4 步零位移
+        (43/45 rotate_ccw×6 ↔ 44/46 rotate_cw×6)。抓到的常是目标
+        bearing 不是转动意图; prompt 从未教 VLM "在 reasoning 里说
+        转角"协议 (forward 的 "say forward Xm" 是明文协议) → 折算
+        属越权解释。默认旋转角度 = 所选图边 chain_count;
+        --vlm-angle-parse 消融保留旧行为。
+        """
+        if not (getattr(self, '_ff', None) or {}).get('vlm_angle_parse', False):
+            return None
+        import re
+        angle_match = re.search(r'(\d+)\s*[°deg]', reasoning)
+        if not angle_match:
+            return None
+        desired_deg = int(angle_match.group(1))
+        # AVDB graph: each rotate edge is ~30°. Round to nearest 30° multiple.
+        # REMOVE this rounding on real robot — just execute the exact angle.
+        steps = max(1, min(6, round(desired_deg / 30)))
+        logging.info(f'VLM wants ~{desired_deg}° → {steps} edges = {steps*30}°')
+        return steps
 
     def _preprocessing_module(self, obs: dict):
         """Draw a clean numbered direction panel on the right side of the image."""
@@ -156,6 +196,10 @@ class AVDBAgent(ObjectNavAgent):
                 memory_section = f"{memory_section}\n\n{depth_trace}".strip()
             r = orig_construct(goal, prompt_type, num_actions, memory_section, avail_actions)
             if prompt_type == 'stopping':
+                # B1 桥: 新鲜目击 → 停票重查提示 (置顶, 在 yolo_text 之前)
+                fs = obs.get('fresh_sighting')
+                if fs:
+                    r = f"{bridge_hint(fs)}\n\n---\n\n{r}"
                 yt = obs.get('yolo_text', '')
                 if yt: r = f"{yt}\n\n---\n\n{r}"
             return r
@@ -174,14 +218,9 @@ class AVDBAgent(ObjectNavAgent):
             import re
 
             if opt.get('chain_type') in ('rotate_cw', 'rotate_ccw'):
-                angle_match = re.search(r'(\d+)\s*[°deg]', reasoning)
-                if angle_match:
-                    desired_deg = int(angle_match.group(1))
-                    # AVDB graph: each rotate edge is ~30°. Round to nearest 30° multiple.
-                    # REMOVE this rounding on real robot — just execute the exact angle.
-                    steps = max(1, min(6, round(desired_deg / 30)))
+                steps = self._parse_vlm_rotate_steps(opt, reasoning)
+                if steps is not None:
                     agent_action.rotate_steps = steps
-                    logging.info(f'VLM wants ~{desired_deg}° → {steps} edges = {steps*30}°')
 
             elif opt.get('chain_type') == 'forward':
                 dist_match = re.search(r'(\d+\.?\d*)\s*m', reasoning)

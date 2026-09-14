@@ -117,11 +117,18 @@ class Env:
 
         logging.info(f'\n===================STARTING RUN: {self.curr_run_name} ===================\n')
         for _ in range(self.cfg['max_steps']):
+            # A③: VLM 判局策略触发 → 提前中止 (无效局随 EP-STATS 落 CSV, 不悄悄丢)
+            if getattr(self, '_vlm_episode_invalid', False):
+                logging.critical(
+                    f'[VLM-FAIL-POLICY] episode aborted early @step {self.step}: '
+                    f'{getattr(self, "_vlm_invalid_reason", "")}')
+                break
             try:
                 agent_action = self._step_env(obs)
                 if agent_action is None:
                     break
                 obs = self.simWrapper.step(agent_action)
+                self._record_exec_trace(obs)   # A④: 最终执行审计回写
 
             except Exception as e:
                 log_exception(e)
@@ -129,6 +136,10 @@ class Env:
             finally:
                 self.step += 1
         self._post_episode()
+
+    def _record_exec_trace(self, obs):
+        """A④ hook: wrapper 最终执行审计回写 details.txt (avdb_env 覆写; 基类空)"""
+        pass
 
     def _initialize_episode(self, episode_ndx: int):
         """
@@ -199,7 +210,12 @@ class Env:
         """
         self.df = pd.concat([self.df, pd.DataFrame([step_metadata])], ignore_index=True)
 
-        if self.step % self.cfg['log_freq'] == 0 or step_metadata['success'] == 0:
+        # log_freq=0: 批量长跑省 IO 的"纯数据"模式 (不写逐步图片/GIF);
+        # 失败步 (success=0) 仍写 _ERROR 目录保诊断图。此处不能裸取模 —
+        # step % 0 除零曾使每步在写图阶段抛异常, _run_episode 捕获后跳过
+        # obs 推进, 机器人全程静止而日志看似正常 (2026-09-11 batch 冒烟实锤)
+        if (self.cfg['log_freq'] and self.step % self.cfg['log_freq'] == 0) \
+                or step_metadata['success'] == 0:
             path = f'logs/{self.outer_run_name}/{self.inner_run_name}/{self.curr_run_name}/step{self.step}'
             if not step_metadata['success']:
                 path += '_ERROR'

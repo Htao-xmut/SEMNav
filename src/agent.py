@@ -149,6 +149,12 @@ class VLMNavAgent(Agent):
         self._extended_forward = False  # A1 init
         # 停止决策历史记录
         self.stop_history = []  # list of bool (done values)
+        # A⑥ 计量: 强制探索 rec-follow 诊断计数 (EP-STATS → CSV, 专家1 指标名)
+        self._forced_rec_used = 0
+        self._forced_rec_errors = 0
+        self._forced_random_used = 0
+        self.last_forced_kind = None   # B⑦: 强制探索意图 (env 传播给 wrapper)
+        self._last_zero_force_step = -99   # #29: 强制探索踢冷却锚点
         # 方案A: 执行验证变量
         self.prev_pos = None
         self.stuck_count = 0
@@ -1349,6 +1355,7 @@ class ObjectNavAgent(VLMNavAgent):
 
         # 先跑 preprocessing 获取动作候选
         a_final, images = self._preprocessing_module(obs)
+        self.last_forced_kind = None   # B⑦: 每步重置 (强制探索时置 rec/random)
         step_metadata = {
             'action_number': -10,
             'success': 1,
@@ -1370,6 +1377,9 @@ class ObjectNavAgent(VLMNavAgent):
             self.stop_history.append(called_stop)
             if len(self.stop_history) > 20:
                 self.stop_history = self.stop_history[-20:]
+
+        # 阶段0 修复2 Layer 2 (vote_fastpath): 本票是否经快通道发出
+        self.last_stop_was_fastpath = False
 
         # === 停止条件: 连续2次 done=1（当前 + 上一步）===
         # done=0 时自动重置计数，防止基于旧票误停
@@ -1398,6 +1408,20 @@ class ObjectNavAgent(VLMNavAgent):
         elif self.step_ndx >= 5 and self.stuck_count >= 3 and sum(1 for v in self.stop_history if v) >= 1:
             should_stop = True
             stop_reason = f"stuck+seen: stuck {self.stuck_count} steps"
+
+        # === 阶段0 修复2 Layer 2 (vote_fastpath): 桥接快通道 —
+        #     env 侧武装 (新鲜目击≤3步 + 当前帧有框 + 质量门 conf≥0.30 OR
+        #     area≥0.01) 且本票 done=1 → 连票门槛 2→1。
+        #     安全性: 停票仍过 env 全部米制门 (框面积≥2% 或深探≤1.0m 才
+        #     close; 无框一律 far 不变) — 连票数只是防幻觉票的第二道保险,
+        #     "有框+有桥"的票已有米制证据背书 (设计稿 §4)。
+        #     step_ndx≥3 与既有三条件同地板 (防 warmup 期误停)。 ===
+        if not should_stop and getattr(self, 'fastpath_armed', False) \
+                and self.step_ndx >= 3 and called_stop and consecutive_stops >= 1:
+            should_stop = True
+            stop_reason = (f"fastpath: bridge+box single vote "
+                           f"(consecutive={consecutive_stops})")
+            self.last_stop_was_fastpath = True
 
         if should_stop:
             logging.info(f'Stop by {stop_reason}')
@@ -1523,67 +1547,45 @@ class ObjectNavAgent(VLMNavAgent):
                 if hasattr(self, 'stuck_count') and self.stuck_count >= 3:
                     force_explore = True
                     force_reason = f"physically stuck ({self.stuck_count} steps)"
-                # 连续20步done=0 → 强制随机探索 (AVDB: 放宽避免误触发)
-                if hasattr(self, 'stop_history') and len(self.stop_history) >= 20:
-                    recent_dones = self.stop_history[-20:]
-                    if all(not v for v in recent_dones):
-                        force_explore = True
-                        force_reason = "20 steps done=0"
+                # 连续20步done=0 → 强制探索一踢 (#29: 旧版逐步闩死 —
+                #   条件"最近20票全done=0"一旦成立永不释放, step20 后
+                #   每步都强制, VLM 决策被旁路 30 步。实弹 mahatma-ab:
+                #   step20-49 全 forced_rec, 6 次扫描 CLEAR 提示喂了
+                #   也没人听。改一次性踢 + 5 步冷却: 踢一脚跟 depth
+                #   rec 走, 之后 5 步还给 VLM (读 SCAN/MEMORY 决策),
+                #   仍无目击再踢)
+                if self._zero_done_streak() \
+                        and self.step_ndx - getattr(self, '_last_zero_force_step', -99) >= 5:
+                    force_explore = True
+                    force_reason = "20 steps done=0 (kick #29)"
+                    self._last_zero_force_step = self.step_ndx
 
                 if force_explore:
-                    valid_nonzero = [i for i in range(len(list(a_final))) if i != 0]
-                    if valid_nonzero:
+                    # B⑨⑩ (2026-09-13, #28): 选择逻辑方法化 (_choose_forced_
+                    # exploration, 单测直测)。旧版病灶: rec-follow 拿
+                    # list(a_final)[i] 当选项 dict 解 .get('composite') —
+                    # AVDB 下 a_final=[(1.0,0.0)]*N 是占位元组, 每次必炸
+                    # AttributeError 被静默吞 (bm15/p16/p26/smka 合计 168 次
+                    # 强制探索 0 次跟随全走随机, 冒烟 33/33 全炸实锤)
+                    try:
+                        forced, _fk_kind = self._choose_forced_exploration(obs)
+                    except Exception:
+                        self._forced_rec_errors = getattr(self, '_forced_rec_errors', 0) + 1
+                        logging.exception('[FORCED-REC] 强制探索选择抛异常 (回退旧随机)')
                         import random
-                        forced = random.choice(valid_nonzero)
-                        # bm15 实弹: 20 步 done=0 后每步 random 抢走选择权,
-                        # 无视深度图 FRESH-AREA 推荐 → 掉头回已探索区游荡到
-                        # max_steps。修: 跟随 wrapper 结构化推荐方位
-                        # obs['depth_rec_deg'] (含区域新鲜度调整 + 滞回);
-                        # 文本正则仅兜底 (bm18 实弹: depth_trace 里无
-                        # "Recommended: ±Ndeg" 字样, 27 次 forced 0 次跟随)
-                        try:
-                            rec_deg = obs.get('depth_rec_deg')
-                            if rec_deg is None:
-                                import re as _re
-                                m = _re.search(r'Recommended: ([+-]\d+)deg',
-                                               obs.get('depth_trace') or '')
-                                if m:
-                                    rec_deg = float(m.group(1))
-                            if rec_deg is not None:
-                                rec_deg = float(rec_deg)
-
-                                def _opt_bearing(o):
-                                    if o.get('composite'):
-                                        et, cnt = o['composite'][0]
-                                    else:
-                                        et, cnt = (o.get('chain_type'),
-                                                   o.get('chain_count', 1))
-                                    base = {'rotate_cw': 30.0, 'rotate_ccw': -30.0,
-                                            'forward': 0.0, 'backward': 180.0,
-                                            'left': -90.0, 'right': 90.0}.get(et, None)
-                                    if base is None:
-                                        return None
-                                    return base * (cnt or 1)
-
-                                best, best_d = None, 1e9
-                                for i in valid_nonzero:
-                                    b = _opt_bearing(list(a_final)[i])
-                                    if b is None:
-                                        continue
-                                    d = abs((b - rec_deg + 540) % 360 - 180)
-                                    if d < best_d:
-                                        best_d, best = d, i
-                                if best is not None and best_d <= 100:
-                                    forced = best
-                                    logging.info(
-                                        f'Forced exploration follows DEPTH rec '
-                                        f'{rec_deg:+.0f}deg (fresh-area aware)')
-                        except Exception:
-                            pass
-                        logging.warning(f"Forced exploration ({force_reason}): forcing action {forced}")
-                        step_metadata['action_number'] = forced
-                        step_metadata['forced_exploration'] = True
-                        chosen_action = forced
+                        valid_nonzero = [i for i in range(len(list(a_final))) if i != 0]
+                        forced = random.choice(valid_nonzero) if valid_nonzero else 0
+                        _fk_kind = 'random'
+                    if _fk_kind == 'rec':
+                        self._forced_rec_used = getattr(self, '_forced_rec_used', 0) + 1
+                        self.last_forced_kind = 'rec'
+                    else:
+                        self._forced_random_used = getattr(self, '_forced_random_used', 0) + 1
+                        self.last_forced_kind = 'random'
+                    logging.warning(f"Forced exploration ({force_reason}): forcing action {forced}")
+                    step_metadata['action_number'] = forced
+                    step_metadata['forced_exploration'] = True
+                    chosen_action = forced
 
                 agent_action = self._action_number_to_polar(chosen_action, list(a_final))
 
@@ -1627,6 +1629,89 @@ class ObjectNavAgent(VLMNavAgent):
             'images': images
         }
         return agent_action, metadata
+
+    def _zero_done_streak(self):
+        """#29 (2026-09-13): 最近 20 票是否全 done=0 (强制探索踢门槛)
+
+        独立成方法供单测直测 — 闩死 bug 的病灶就是这个条件在
+        _choose_action 内联且无冷却, 一旦成立每步都触发。
+        """
+        if not hasattr(self, 'stop_history') or len(self.stop_history) < 20:
+            return False
+        return all(not v for v in self.stop_history[-20:])
+
+    def _choose_forced_exploration(self, obs):
+        """B⑨⑩ (2026-09-13, #28): 强制探索的安全分层选择
+
+        数据源修正 (#28 病灶): 旧版拿 list(a_final)[i] 当选项 dict —
+        AVDB 下 a_final 是占位元组列表, 必炸。真选项在
+        obs['edge_options'][i] (编号与动作号一致), 安全元数据在
+        obs['option_safety'] (wrapper 侧算: 复合/⛔黑名单/2步震荡禁入/
+        落点 visited≥3 出池)。
+
+        回退顺序 (专家1 门槛 "安全回退顺序"):
+          层1 depth_rec 跟随 (结构化方位, 文本正则仅兜底)
+          层2 新鲜落点平移 (前沿跳跃/换机位精神 — 平移才有新站位)
+          层3 安全池任意平移
+          层4 纯旋转 (最后手段 — 无位移, 只换朝向)
+        返回 (forced_idx, kind): kind ∈ 'rec' | 'random';
+        forced_idx=None 表示无安全选项 (调用方回退旧行为)。
+        """
+        import random
+        opts = obs.get('edge_options') or []
+        safety = {s.get('idx'): s for s in obs.get('option_safety') or []}
+
+        def _safe(i):
+            s = safety.get(i)
+            if s is None:
+                return True   # 元数据缺失 (非 AVDB wrapper) → 保守放行
+            return not (s.get('composite') or s.get('blacklisted')
+                        or s.get('osc_banned')
+                        or s.get('landing_visits', 0) >= 3)
+
+        valid = [i for i in range(1, len(opts)) if _safe(i)]
+        if not valid:
+            return None, 'random'
+
+        # 层1 (B⑩): 深度结构化推荐跟随
+        rec_deg = obs.get('depth_rec_deg')
+        if rec_deg is None:
+            import re as _re
+            m = _re.search(r'Recommended: ([+-]\d+)deg',
+                           obs.get('depth_trace') or '')
+            if m:
+                rec_deg = float(m.group(1))
+        if rec_deg is not None:
+            rec_deg = float(rec_deg)
+            bearing = getattr(self, '_option_bearing', None)
+            best, best_d = None, 1e9
+            if bearing:
+                for i in valid:
+                    d = abs((bearing(opts[i]) - rec_deg + 540) % 360 - 180)
+                    if d < best_d:
+                        best_d, best = d, i
+            if best is not None and best_d <= 100:
+                logging.info(f'Forced exploration follows DEPTH rec '
+                             f'{rec_deg:+.0f}deg (fresh-area aware, '
+                             f'Δ{best_d:.0f}deg)')
+                return best, 'rec'
+            logging.info(f'[FORCED-REC] rec {rec_deg:+.0f}deg 可用但无匹配选项 '
+                         f'(best_d={"inf" if best_d >= 1e9 else f"{best_d:.0f}deg"}) '
+                         f'→ 安全池分层回退')
+
+        # 层2: 新鲜落点平移 (landing_fresh = 落点 2m 粗格没到过)
+        WALK = ('forward', 'backward', 'left', 'right')
+        fresh_walk = [i for i in valid
+                      if safety.get(i, {}).get('landing_fresh')
+                      and opts[i].get('chain_type') in WALK]
+        if fresh_walk:
+            return random.choice(fresh_walk), 'random'
+
+        # 层3: 安全池任意平移 → 层4: 只剩纯旋转 (最后手段)
+        walks = [i for i in valid if opts[i].get('chain_type') in WALK]
+        if walks:
+            return random.choice(walks), 'random'
+        return random.choice(valid), 'random'
 
     def _construct_prompt(self, goal: dict, prompt_type:str, num_actions: int=0, memory_section: str="", avail_actions: str=""):
         """Constructs the prompt, depending on the goal modality. """

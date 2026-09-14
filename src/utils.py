@@ -275,9 +275,13 @@ def log_exception(e):
     logging.error(f"Error: {e}")
 
 
-def create_gif(image_dir, interval=600):
+def create_gif(image_dir, interval=900):
     """
     Creates a GIF animation from images in the specified directory.
+
+    每步一帧 = [chosen 画面 | 俯视深度图] 左右合成 (用户 2026-09-13 要求:
+    chosen 和 depth_map 合并做 gif — 抽查"深度图↔实际行走方向/位置是否
+    对应"不用来回切目录)。chosen 缺失时回退原始 color_sensor 帧。
 
     Args:
         image_dir (str): Path to the directory containing images.
@@ -286,34 +290,48 @@ def create_gif(image_dir, interval=600):
     Returns:
         None: Saves the GIF animation in the directory.
     """
-    # Create a figure that tightly matches the size of the images (1920x1080)
-    fig, ax = plt.subplots(figsize=(19.2, 10.8), dpi=100)
-    ax.set_position([0, 0, 1, 1])  # Remove all padding
-    ax.axis('off')
-
-    frames = []
+    comp_frames = []
 
     # Process up to 80 steps
     for i in range(min(len(os.listdir(image_dir)) - 1, 80)):
         try:
-            img = cv2.imread(f"{image_dir}/step{i}/color_sensor.png")
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            frame = [ax.imshow(img_rgb, animated=True)]
-            frames.append(frame)
-
-            img_copy = cv2.imread(f"{image_dir}/step{i}/color_sensor_chosen.png")
-            img_copy_rgb = cv2.cvtColor(img_copy, cv2.COLOR_BGR2RGB)
-            frame_copy = [ax.imshow(img_copy_rgb, animated=True)]
-            frames.append(frame_copy)
-
-        except Exception as e:
+            chosen_p = f"{image_dir}/step{i}/color_sensor_chosen.png"
+            raw_p = f"{image_dir}/step{i}/color_sensor.png"
+            depth_p = f"{image_dir}/step{i}/topdown_depth_map.png"
+            chosen = cv2.imread(chosen_p)
+            if chosen is None:
+                chosen = cv2.imread(raw_p)
+            if chosen is None:
+                continue
+            depth = cv2.imread(depth_p)
+            if depth is not None:
+                h = chosen.shape[0]
+                scale = h / depth.shape[0]
+                depth = cv2.resize(
+                    depth, (max(1, int(depth.shape[1] * scale)), h))
+                sep = np.full((h, 6, 3), 255, dtype=np.uint8)
+                comp = np.hstack([chosen, sep, depth])
+            else:
+                comp = chosen
+            comp_frames.append(comp)
+        except Exception:
             continue
 
+    if not comp_frames:
+        return
+
+    # 画布尺寸按首帧合成图定 (等比, 无 padding)
+    fh, fw = comp_frames[0].shape[:2]
+    fig, ax = plt.subplots(figsize=(fw / 100, fh / 100), dpi=100)
+    ax.set_position([0, 0, 1, 1])  # Remove all padding
+    ax.axis('off')
+
+    frames = [[ax.imshow(cv2.cvtColor(c, cv2.COLOR_BGR2RGB), animated=True)]
+              for c in comp_frames]
+
     # Add a black frame at the end
-    black_frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
-    black_frame_rgb = cv2.cvtColor(black_frame, cv2.COLOR_BGR2RGB)
-    frame_black = [ax.imshow(black_frame_rgb, animated=True)]
-    frames.append(frame_black)
+    black_frame = [ax.imshow(np.zeros_like(comp_frames[0]), animated=True)]
+    frames.append(black_frame)
 
     # Create the animation
     ani = animation.ArtistAnimation(fig, frames, interval=interval, blit=True)

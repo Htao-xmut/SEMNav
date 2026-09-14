@@ -148,10 +148,12 @@ def test_deadband():
 def test_identity_gate():
     e = make_env()
     e.step = 10
-    yolo = {'target_found': True, 'confidence': 0.51, 'position': 'middle_center',
-            'area_ratio': 0.004,
+    # #51a 后否决路径须用"可信框" (conf≥0.50 且 area≥1%): conf 0.51 +
+    # area 0.004 (bmd01 病例) 现在转前进二确认, 不再直接否决 — 单独断言在下方
+    yolo = {'target_found': True, 'confidence': 0.55, 'position': 'middle_center',
+            'area_ratio': 0.03,
             'all_detections': [{'class_name': 'coca_cola_glass_bottle',
-                                'confidence': 0.51, 'bbox_norm': [0.4, 0.4, 0.6, 0.6]}]}
+                                'confidence': 0.55, 'bbox_norm': [0.4, 0.4, 0.6, 0.6]}]}
     obs = {'color_sensor': np.zeros((480, 640, 3), np.uint8), 'edge_options': OPTS,
            'yolo_detection': yolo}
     calls = {'vlm': 0, 'inval': [], 'ovr': []}
@@ -163,11 +165,35 @@ def test_identity_gate():
     e._override_and_run = lambda o, i, t, n='': calls['ovr'].append((i, t)) or ('ret', i)
 
     out = e._approach_step(obs)
-    check('身份=no: 解锁 (drop_sighting) 并回落探索 (返回 None)',
-          out is None and calls['vlm'] == 1
+    # #16 后身份=no 先解锁再换机位重看 (灯下黑防护) — 返回 None (无可换)
+    # 或 REPOSITION 覆盖动作, 两者都算"回落探索"; 核心断言=解锁参数
+    check('身份=no: 解锁 (drop_sighting) 并回落探索 (None 或换机位)',
+          (out is None or out[0] == 'ret') and calls['vlm'] == 1
           and calls['inval'] and calls['inval'][0][1].get('drop_sighting') is True
           and calls['inval'][0][1].get('blacklist') is False)
     check('身份=no: 节点记入排除窗', e._identity_reject.get('N1') == 10)
+
+    # #51a/#42 (bmd01 病例): conf 0.51 + area 0.004 远距小框 no → 不再
+    # 直接否决, 转前进二次确认 (CONFIRM override), 预算记账 1/3
+    e51 = make_env()
+    e51.step = 30
+    y51 = {'target_found': True, 'confidence': 0.51, 'position': 'middle_center',
+           'area_ratio': 0.004,
+           'all_detections': [{'class_name': 'coca_cola_glass_bottle',
+                               'confidence': 0.51, 'bbox_norm': [0.48, 0.4, 0.52, 0.46]}]}
+    obs51 = {'color_sensor': np.zeros((480, 640, 3), np.uint8), 'edge_options': OPTS,
+             'yolo_detection': y51}
+    ovr51 = []
+    e51._detection_bearing_deg = lambda yi: 5.0
+    e51._vlm_identity_check = lambda o, y: 'no'
+    e51._invalidate_lock = lambda r, **kw: None
+    e51._pick_confirm_option = lambda o, y: 7
+    e51._override_and_run = lambda o, i, t, n='': ovr51.append((i, t)) or ('ret', i)
+    out51 = e51._approach_step(obs51)
+    check('#51a: 小框低置信 no → 前进二确认 (CONFIRM) 而非否决',
+          ovr51 and ovr51[0][1] == 'CONFIRM' and out51 is not None
+          and e51._lowconf_confirm_used.get('N1') == 1
+          and not getattr(e51, '_identity_reject', {}))
 
     # 排除窗内 (step 未过 10 步) 不再问 VLM, 直接探索
     e.step = 12

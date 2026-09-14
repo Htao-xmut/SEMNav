@@ -79,10 +79,14 @@ def test_stop_evidence():
     obs = {'yolo_detection': det([0.48, 0.48, 0.52, 0.52]),
            'depth_sensor': depth_frame(4.0)}
     check('证据: 小框深探 4m → far (G2 拦截点)', env._stop_evidence(obs)[0] == 'far')
-    # 小框 + 深度 1.5m → close
-    obs = {'yolo_detection': det([0.48, 0.48, 0.52, 0.52]),
-           'depth_sensor': depth_frame(1.5)}
-    check('证据: 小框深探 1.5m → close', env._stop_evidence(obs)[0] == 'close')
+    # 1.3 收紧分级: ≤1.0m 硬判据 close; (1.0, 2.2]m 软接近 far (拒停
+    # 转接近锁, 原旧判据 1.5m 会 close — bm18 曾停 1.68m 即其后果)
+    for d_, tag in ((0.95, 'close'), (1.01, 'far'), (1.5, 'far'),
+                    (2.19, 'far'), (2.21, 'far')):
+        obs = {'yolo_detection': det([0.48, 0.48, 0.52, 0.52]),
+               'depth_sensor': depth_frame(d_)}
+        check(f'证据: 1.3 分级 小框深探 {d_}m → {tag}',
+              env._stop_evidence(obs)[0] == tag)
     # bm10/bm14 回归: 小框 + 极近 = 遮挡物击中探测 → 小框即远证据 → far
     # (bm14: 1.6% 框 + 0.06m 探深, 真距 5.43m; 旧版 defer crop 后放大
     #  裁剪抹掉尺寸线索被判 close → fp 停)
@@ -97,9 +101,9 @@ def test_stop_evidence():
           isinstance(ev, tuple) and ev[0] == 'far'
           and ev[1] is obs['yolo_detection'],
           f'ev={ev[0] if isinstance(ev, tuple) else ev}')
-    # 深度探测位置取 bbox 中心而非全图: 左侧近墙 (2m) 右侧远 (5m)
+    # 深度探测位置取 bbox 中心而非全图: 左侧近墙 (0.9m) 右侧远 (5m)
     d = depth_frame(5.0)
-    d[:, :480] = 2.0                      # 左半近
+    d[:, :480] = 0.9                      # 左半近 (≤1.0 硬判据)
     obs = {'yolo_detection': det([0.10, 0.45, 0.20, 0.55]),   # 中心 x=0.15 → 左
            'depth_sensor': d}
     check('证据: 探测取 bbox 中心局部 (左近框 → close)',

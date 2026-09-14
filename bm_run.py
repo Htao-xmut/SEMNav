@@ -16,6 +16,9 @@ NAME = f'bm{GRP}_{CAT.split("_")[0]}{GRP}'
 
 from avdb_env import AVDBEnv
 from vlm import QwenVLClient
+from feature_flags import parse_argv, describe
+
+_cli_flags, _rest = parse_argv(sys.argv[1:])   # --no-xxx 等消融开关剥离
 from simWrapper import PolarAction
 from omegaconf import OmegaConf
 from dotenv import load_dotenv
@@ -81,7 +84,8 @@ config = {
         'split': 'val',
         'target_category': CAT,
         'start_episode_idx': IDX,
-        'success_threshold': 1.5,
+        'success_threshold': 1.5 if _cli_flags.get('single_thresh') else 1.0,
+        # 1.3 收紧: 对齐主判据 SR@1.0m (原 1.5; single_thresh 对照档复现 1.5)
         'instances': 1,
         'instance': 0,
         'parallel': False,
@@ -111,6 +115,9 @@ if not api_key:
     sys.exit(1)
 
 print(f"[BM{GRP}] {CAT} ep[{IDX}] → logs/ObjectNav_{NAME}")
+if _cli_flags:
+    config['feature_flags'] = _cli_flags
+    print(f"[BM{GRP}] ablation flags: {_cli_flags}")
 env = AVDBEnv(cfg=config)
 env.run_experiment()
 print(f"[BM{GRP}] DONE")
